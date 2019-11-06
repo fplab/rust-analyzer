@@ -1,0 +1,77 @@
+
+<style>
+body                { margin: 0; }
+pre                 { color: #DCDCCC; background: #3F3F3F; font-size: 22px; padding: 0.4em; }
+
+span[data-binding-hash="17345776350595449890"]
+                    { color: hsl(249,83%,81%); }
+span[data-binding-hash="14969592207129170875"]
+                    { color: hsl(182,71%,60%); }
+span[data-binding-hash="12498705718044789967"]
+                    { color: hsl(11,57%,71%); }
+
+
+.lifetime           { border-right: thin solid orange; }
+.sideBySide         { display: flex; }
+.rustCode           { flex-grow: 1; }
+
+.comment            { color: #7F9F7F; }
+.string             { color: #CC9393; }
+.function           { color: #93E0E3; }
+.parameter          { color: #94BFF3; }
+.builtin            { color: #DD6718; }
+.text               { color: #DCDCCC; }
+.attribute          { color: #94BFF3; }
+.literal            { color: #BFEBBF; }
+.macro              { color: #94BFF3; }
+.variable           { color: #DCDCCC; }
+.variable\.mut      { color: #DCDCCC; text-decoration: underline; }
+
+
+.keyword            { color: #F0DFAF; }
+.keyword\.unsafe    { color: #DFAF8F; }
+.keyword\.control   { color: #F0DFAF; font-weight: bold; }
+
+</style>
+<div class="sideBySide">
+<span class="lifetime"><pre><code><span data-binding-hash="12498705718044789967">
+
+
+
+
+
+second_tier_ref |
+
+
+</span></code></pre></span>
+<span class="lifetime"><pre><code><span data-binding-hash="17345776350595449890">
+
+
+
+i |
+  |
+
+
+
+</span></code></pre></span>
+<span class="lifetime"><pre><code><span data-binding-hash="14969592207129170875">
+
+
+
+
+ref_i |
+      |
+
+
+</span></code></pre></span>
+<div class="rustCode"><pre><code><span class="comment">// lifetime1.rs</span>
+<span class="comment">// Lifetime</span>
+
+<span class="keyword">fn</span> <span class="function">main</span>() {
+   <span class="keyword">let</span> <span class="keyword">mut</span> <span class="variable.mut" data-binding-hash="17345776350595449890">i</span>:<span class="type">i32</span> = <span class="literal">1</span>;
+   <span class="keyword">let</span> <span class="keyword">mut</span> <span class="variable.mut" data-binding-hash="14969592207129170875">ref_i</span> = &<span class="keyword">mut</span> <span class="variable.mut" data-binding-hash="17345776350595449890">i</span>;
+   <span class="keyword">let</span> <span class="variable.mut" data-binding-hash="12498705718044789967">second_tier_ref</span> = &<span class="keyword">mut</span> <span class="variable.mut" data-binding-hash="14969592207129170875">ref_i</span>;
+   <span class="macro">print</span><span class="macro">!</span>(<span class="string">"{}"</span>, **second_tier_ref)
+}</code></pre></div>
+</div>
+

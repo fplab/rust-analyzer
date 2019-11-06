@@ -227,6 +227,28 @@ pub(crate) fn highlight_as_html(db: &RootDatabase, file_id: FileId, rainbow: boo
         )
     }
 
+    fn register_lifetime(
+        hash: u64,
+        var_name: &String,
+        curr_line_num: usize,
+        lt_table_ref: &mut FxHashMap<u64, (String, usize, usize)>,
+        var_style_buf: &mut String
+    ) {
+        if !lt_table_ref.contains_key(&hash) {
+            var_style_buf.push_str(&format!(
+                r#"span[data-binding-hash="{hash}"]
+                    {{ color: {color}; }}{newline}"#,
+                hash = hash,
+                color = rainbowify(hash),
+                newline = "\n"
+            ));
+        }
+        lt_table_ref.entry(hash).or_insert((var_name.to_string(), curr_line_num, curr_line_num));           // initialize a lifetime entry
+        if let Some(tuple) = lt_table_ref.get_mut(&hash) {
+            tuple.2 = curr_line_num;                                                                        // update a lifetime entry
+        }
+    }
+
     let mut ranges = highlight(db, file_id);
     ranges.sort_by_key(|it| it.range.start());
     // quick non-optimal heuristic to intersect token ranges and highlighted ranges
@@ -234,8 +256,13 @@ pub(crate) fn highlight_as_html(db: &RootDatabase, file_id: FileId, rainbow: boo
     let mut could_intersect: Vec<&HighlightedRange> = Vec::new();
 
     let mut buf = String::new();
-    buf.push_str(&STYLE);
-    buf.push_str("<pre><code>");
+    let mut code_buf = String::new();
+    let mut var_style_buf = String::new();
+    // Lifetime table maps variable's binding-hash -> (variable name, lifetime_beginning_line, lifetime_ending_line)
+    let mut var_lifetime_table: FxHashMap<u64, (String, usize, usize)> = FxHashMap::default();
+    let mut current_line_num: usize = 0;
+
+    code_buf.push_str("<div class=\"rustCode\"><pre><code>");
     let tokens = parse.tree().syntax().descendants_with_tokens().filter_map(|it| it.into_token());
     for token in tokens {
         could_intersect.retain(|it| token.text_range().start() <= it.range.end());
@@ -248,27 +275,47 @@ pub(crate) fn highlight_as_html(db: &RootDatabase, file_id: FileId, rainbow: boo
             }
         }
         let text = html_escape(&token.text());
+        let newline_count = text.matches("\n").count();
+        current_line_num += newline_count;
+        // code_buf.push_str(&format!("found [{}]", text));
         let ranges = could_intersect
             .iter()
             .filter(|it| token.text_range().is_subrange(&it.range))
             .collect::<Vec<_>>();
         if ranges.is_empty() {
-            buf.push_str(&text);
+            code_buf.push_str(&text);
         } else {
             let classes = ranges.iter().map(|x| x.tag).collect::<Vec<_>>().join(" ");
             let binding_hash = ranges.first().and_then(|x| x.binding_hash);
-            let color = match (rainbow, binding_hash) {
-                (true, Some(hash)) => format!(
-                    " data-binding-hash=\"{}\" style=\"color: {};\"",
-                    hash,
-                    rainbowify(hash)
-                ),
+            
+            let data_tag = match (rainbow, binding_hash) {
+                (true, Some(hash)) => {
+                    register_lifetime(hash, &text, current_line_num, &mut var_lifetime_table, &mut var_style_buf);
+                    format!(" data-binding-hash=\"{}\"", hash)
+                },
                 _ => "".into(),
             };
-            buf.push_str(&format!("<span class=\"{}\"{}>{}</span>", classes, color, text));
+            
+            code_buf.push_str(&format!("<span class=\"{}\"{}>{}</span>", classes, data_tag, text));
         }
     }
-    buf.push_str("</code></pre>");
+
+    buf.push_str(&STYLE.replace("{{binding-hash-style}}", &var_style_buf));
+    code_buf.push_str("</code></pre></div>\n");
+
+    buf.push_str("<div class=\"sideBySide\">\n");
+    for (hash, iter) in var_lifetime_table.iter() {
+        let (var_name, starting_line_num, ending_line_num) = iter;
+        buf.push_str(&format!("<span class=\"lifetime\"><pre><code><span data-binding-hash=\"{}\">", hash));
+        buf.push_str(&"\n".repeat(*starting_line_num));
+        buf.push_str(&(var_name.to_string() + " |\n"));
+        buf.push_str(&(" ".repeat(var_name.len()) + " |\n").to_string().repeat(ending_line_num - starting_line_num));
+        buf.push_str(&"\n".repeat(current_line_num - ending_line_num));      // pad all the final empty lines
+        buf.push_str("</span></code></pre></span>\n");
+    }
+
+    buf.push_str(&code_buf);
+    buf.push_str("</div>\n"); 
     buf
 }
 
@@ -282,6 +329,12 @@ const STYLE: &str = "
 body                { margin: 0; }
 pre                 { color: #DCDCCC; background: #3F3F3F; font-size: 22px; padding: 0.4em; }
 
+{{binding-hash-style}}
+
+.lifetime           { border-right: thin solid orange; }
+.sideBySide         { display: flex; }
+.rustCode           { flex-grow: 1; }
+
 .comment            { color: #7F9F7F; }
 .string             { color: #CC9393; }
 .function           { color: #93E0E3; }
@@ -292,11 +345,13 @@ pre                 { color: #DCDCCC; background: #3F3F3F; font-size: 22px; padd
 .literal            { color: #BFEBBF; }
 .macro              { color: #94BFF3; }
 .variable           { color: #DCDCCC; }
-.variable\\.mut     { color: #DCDCCC; text-decoration: underline; }
+.variable\\.mut      { color: #DCDCCC; text-decoration: underline; }
+
 
 .keyword            { color: #F0DFAF; }
-.keyword\\.unsafe   { color: #DFAF8F; }
-.keyword\\.control  { color: #F0DFAF; font-weight: bold; }
+.keyword\\.unsafe    { color: #DFAF8F; }
+.keyword\\.control   { color: #F0DFAF; font-weight: bold; }
+
 </style>
 ";
 
