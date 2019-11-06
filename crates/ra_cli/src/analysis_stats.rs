@@ -2,7 +2,7 @@
 
 use std::{collections::HashSet, fmt::Write, path::Path, time::Instant};
 
-use ra_db::SourceDatabase;
+use ra_db::SourceDatabaseExt;
 use ra_hir::{AssocItem, Crate, HasBodySource, HasSource, HirDisplay, ModuleDef, Ty, TypeWalk};
 use ra_syntax::AstNode;
 
@@ -13,6 +13,7 @@ pub fn run(
     memory_usage: bool,
     path: &Path,
     only: Option<&str>,
+    with_deps: bool,
 ) -> Result<()> {
     let db_load_time = Instant::now();
     let (mut host, roots) = ra_batch::load_cargo(path)?;
@@ -22,16 +23,28 @@ pub fn run(
     let mut num_crates = 0;
     let mut visited_modules = HashSet::new();
     let mut visit_queue = Vec::new();
-    for (source_root_id, project_root) in roots {
-        if project_root.is_member() {
-            for krate in Crate::source_root_crates(db, source_root_id) {
-                num_crates += 1;
-                let module =
-                    krate.root_module(db).expect("crate in source root without root module");
-                visit_queue.push(module);
-            }
+
+    let members =
+        roots
+            .into_iter()
+            .filter_map(|(source_root_id, project_root)| {
+                if with_deps || project_root.is_member() {
+                    Some(source_root_id)
+                } else {
+                    None
+                }
+            })
+            .collect::<HashSet<_>>();
+
+    for krate in Crate::all(db) {
+        let module = krate.root_module(db).expect("crate without root module");
+        let file_id = module.definition_source(db).file_id;
+        if members.contains(&db.file_source_root(file_id.original_file(db))) {
+            num_crates += 1;
+            visit_queue.push(module);
         }
     }
+
     println!("Crates in this dir: {}", num_crates);
     let mut num_decls = 0;
     let mut funcs = Vec::new();
@@ -130,7 +143,7 @@ pub fn run(
                         );
                         bar.println(format!(
                             "{} {}:{}-{}:{}: Expected {}, got {}",
-                            path.display(),
+                            path,
                             start.line + 1,
                             start.col_utf16,
                             end.line + 1,

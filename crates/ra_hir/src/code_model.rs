@@ -5,7 +5,7 @@ pub(crate) mod docs;
 
 use std::sync::Arc;
 
-use ra_db::{CrateId, Edition, FileId, SourceRootId};
+use ra_db::{CrateId, Edition, FileId};
 use ra_syntax::ast::{self, NameOwner, TypeAscriptionOwner};
 
 use crate::{
@@ -76,10 +76,8 @@ impl Crate {
         crate_graph.edition(self.crate_id)
     }
 
-    // FIXME: should this be in source_binder?
-    pub fn source_root_crates(db: &impl DefDatabase, source_root: SourceRootId) -> Vec<Crate> {
-        let crate_ids = db.source_root_crates(source_root);
-        crate_ids.iter().map(|&crate_id| Crate { crate_id }).collect()
+    pub fn all(db: &impl DefDatabase) -> Vec<Crate> {
+        db.crate_graph().iter().map(|crate_id| Crate { crate_id }).collect()
     }
 }
 
@@ -569,6 +567,14 @@ impl DefWithBody {
             DefWithBody::Static(s) => s.krate(db),
         }
     }
+
+    pub fn module(self, db: &impl HirDatabase) -> Module {
+        match self {
+            DefWithBody::Const(c) => c.module(db),
+            DefWithBody::Function(f) => f.module(db),
+            DefWithBody::Static(s) => s.module(db),
+        }
+    }
 }
 
 pub trait HasBody: Copy {
@@ -787,6 +793,20 @@ impl Const {
     pub fn impl_block(self, db: &impl DefDatabase) -> Option<ImplBlock> {
         let module_impls = db.impls_in_module(self.module(db));
         ImplBlock::containing(module_impls, self.into())
+    }
+
+    pub fn parent_trait(self, db: &impl DefDatabase) -> Option<Trait> {
+        db.trait_items_index(self.module(db)).get_parent_trait(self.into())
+    }
+
+    pub fn container(self, db: &impl DefDatabase) -> Option<Container> {
+        if let Some(impl_block) = self.impl_block(db) {
+            Some(impl_block.into())
+        } else if let Some(trait_) = self.parent_trait(db) {
+            Some(trait_.into())
+        } else {
+            None
+        }
     }
 
     // FIXME: move to a more general type for 'body-having' items
@@ -1072,6 +1092,16 @@ impl From<AssocItem> for crate::generics::GenericDef {
             AssocItem::Function(f) => f.into(),
             AssocItem::Const(c) => c.into(),
             AssocItem::TypeAlias(t) => t.into(),
+        }
+    }
+}
+
+impl AssocItem {
+    pub fn module(self, db: &impl DefDatabase) -> Module {
+        match self {
+            AssocItem::Function(f) => f.module(db),
+            AssocItem::Const(c) => c.module(db),
+            AssocItem::TypeAlias(t) => t.module(db),
         }
     }
 }

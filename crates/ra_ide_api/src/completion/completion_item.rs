@@ -4,7 +4,7 @@ use std::fmt;
 
 use hir::Documentation;
 use ra_syntax::TextRange;
-use ra_text_edit::{TextEdit, TextEditBuilder};
+use ra_text_edit::TextEdit;
 
 /// `CompletionItem` describes a single completion variant in the editor pop-up.
 /// It is basically a POD with various properties. To construct a
@@ -192,12 +192,10 @@ impl Builder {
         let label = self.label;
         let text_edit = match self.text_edit {
             Some(it) => it,
-            None => {
-                let mut builder = TextEditBuilder::default();
-                builder
-                    .replace(self.source_range, self.insert_text.unwrap_or_else(|| label.clone()));
-                builder.finish()
-            }
+            None => TextEdit::replace(
+                self.source_range,
+                self.insert_text.unwrap_or_else(|| label.clone()),
+            ),
         };
 
         CompletionItem {
@@ -214,6 +212,10 @@ impl Builder {
     }
     pub(crate) fn lookup_by(mut self, lookup: impl Into<String>) -> Builder {
         self.lookup = Some(lookup.into());
+        self
+    }
+    pub(crate) fn label(mut self, label: impl Into<String>) -> Builder {
+        self.label = label.into();
         self
     }
     pub(crate) fn insert_text(mut self, insert_text: impl Into<String>) -> Builder {

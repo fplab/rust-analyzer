@@ -4,7 +4,7 @@ use std::cell::RefCell;
 
 use hir::diagnostics::{AstDiagnostic, Diagnostic as _, DiagnosticSink};
 use itertools::Itertools;
-use ra_db::SourceDatabase;
+use ra_db::{SourceDatabase, SourceDatabaseExt};
 use ra_prof::profile;
 use ra_syntax::{
     algo,
@@ -12,6 +12,7 @@ use ra_syntax::{
     Location, SyntaxNode, TextRange, T,
 };
 use ra_text_edit::{TextEdit, TextEditBuilder};
+use relative_path::RelativePath;
 
 use crate::{db::RootDatabase, Diagnostic, FileId, FileSystemEdit, SourceChange, SourceFileEdit};
 
@@ -47,8 +48,14 @@ pub(crate) fn diagnostics(db: &RootDatabase, file_id: FileId) -> Vec<Diagnostic>
         })
     })
     .on::<hir::diagnostics::UnresolvedModule, _>(|d| {
-        let source_root = db.file_source_root(d.source().file_id.original_file(db));
-        let create_file = FileSystemEdit::CreateFile { source_root, path: d.candidate.clone() };
+        let original_file = d.source().file_id.original_file(db);
+        let source_root = db.file_source_root(original_file);
+        let path = db
+            .file_relative_path(original_file)
+            .parent()
+            .unwrap_or_else(|| RelativePath::new(""))
+            .join(&d.candidate);
+        let create_file = FileSystemEdit::CreateFile { source_root, path };
         let fix = SourceChange::file_system_edit("create module", create_file);
         res.borrow_mut().push(Diagnostic {
             range: d.highlight_range(),
@@ -78,10 +85,9 @@ pub(crate) fn diagnostics(db: &RootDatabase, file_id: FileId) -> Vec<Diagnostic>
     })
     .on::<hir::diagnostics::MissingOkInTailExpr, _>(|d| {
         let node = d.ast(db);
-        let mut builder = TextEditBuilder::default();
         let replacement = format!("Ok({})", node.syntax());
-        builder.replace(node.syntax().text_range(), replacement);
-        let fix = SourceChange::source_file_edit_from("wrap with ok", file_id, builder.finish());
+        let edit = TextEdit::replace(node.syntax().text_range(), replacement);
+        let fix = SourceChange::source_file_edit_from("wrap with ok", file_id, edit);
         res.borrow_mut().push(Diagnostic {
             range: d.highlight_range(),
             message: d.message(),
@@ -145,9 +151,7 @@ fn text_edit_for_remove_unnecessary_braces_with_self_in_use_statement(
         let start = use_tree_list_node.prev_sibling_or_token()?.text_range().start();
         let end = use_tree_list_node.text_range().end();
         let range = TextRange::from_to(start, end);
-        let mut edit_builder = TextEditBuilder::default();
-        edit_builder.delete(range);
-        return Some(edit_builder.finish());
+        return Some(TextEdit::delete(range));
     }
     None
 }

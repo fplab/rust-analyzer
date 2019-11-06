@@ -3,12 +3,36 @@
 use std::iter;
 
 use hir::{db::HirDatabase, Adt, HasSource};
-use ra_syntax::ast::{self, make, AstNode, NameOwner};
+use ra_syntax::ast::{self, edit::IndentLevel, make, AstNode, NameOwner};
 
 use crate::{Assist, AssistCtx, AssistId};
 
-pub(crate) fn fill_match_arms(mut ctx: AssistCtx<impl HirDatabase>) -> Option<Assist> {
-    let match_expr = ctx.node_at_offset::<ast::MatchExpr>()?;
+// Assist: fill_match_arms
+//
+// Adds missing clauses to a `match` expression.
+//
+// ```
+// enum Action { Move { distance: u32 }, Stop }
+//
+// fn handle(action: Action) {
+//     match action {
+//         <|>
+//     }
+// }
+// ```
+// ->
+// ```
+// enum Action { Move { distance: u32 }, Stop }
+//
+// fn handle(action: Action) {
+//     match action {
+//         Action::Move { distance } => (),
+//         Action::Stop => (),
+//     }
+// }
+// ```
+pub(crate) fn fill_match_arms(ctx: AssistCtx<impl HirDatabase>) -> Option<Assist> {
+    let match_expr = ctx.find_node_at_offset::<ast::MatchExpr>()?;
     let match_arm_list = match_expr.match_arm_list()?;
 
     // We already have some match arms, so we don't provide any assists.
@@ -29,19 +53,21 @@ pub(crate) fn fill_match_arms(mut ctx: AssistCtx<impl HirDatabase>) -> Option<As
     };
     let variant_list = enum_def.variant_list()?;
 
-    ctx.add_action(AssistId("fill_match_arms"), "fill match arms", |edit| {
-        let variants = variant_list.variants();
-        let arms = variants
-            .filter_map(build_pat)
-            .map(|pat| make::match_arm(iter::once(pat), make::expr_unit()));
-        let new_arm_list = make::match_arm_list(arms);
+    ctx.add_assist(AssistId("fill_match_arms"), "fill match arms", |edit| {
+        let indent_level = IndentLevel::from_node(match_arm_list.syntax());
+
+        let new_arm_list = {
+            let variants = variant_list.variants();
+            let arms = variants
+                .filter_map(build_pat)
+                .map(|pat| make::match_arm(iter::once(pat), make::expr_unit()));
+            indent_level.increase_indent(make::match_arm_list(arms))
+        };
 
         edit.target(match_expr.syntax().text_range());
         edit.set_cursor(expr.syntax().text_range().start());
-        edit.replace_node_and_indent(match_arm_list.syntax(), new_arm_list.syntax().text());
-    });
-
-    ctx.build()
+        edit.replace_ast(match_arm_list, new_arm_list);
+    })
 }
 
 fn is_trivial(arm: &ast::MatchArm) -> bool {
@@ -126,7 +152,7 @@ mod tests {
                     A::Bs => (),
                     A::Cs(_) => (),
                     A::Ds(_, _) => (),
-                    A::Es{ x, y } => (),
+                    A::Es { x, y } => (),
                 }
             }
             "#,
@@ -179,7 +205,7 @@ mod tests {
 
             fn foo(a: &mut A) {
                 match <|>a {
-                    A::Es{ x, y } => (),
+                    A::Es { x, y } => (),
                 }
             }
             "#,

@@ -1,187 +1,80 @@
 //! This module resolves `mod foo;` declaration to file.
-
-use std::{borrow::Cow, sync::Arc};
-
-use ra_db::{FileId, SourceRoot};
+use ra_db::FileId;
 use ra_syntax::SmolStr;
 use relative_path::RelativePathBuf;
 
 use crate::{db::DefDatabase, HirFileId, Name};
 
-#[derive(Clone, Copy)]
-pub(super) struct ParentModule<'a> {
-    pub(super) name: &'a Name,
-    pub(super) attr_path: Option<&'a SmolStr>,
+#[derive(Clone, Debug)]
+pub(super) struct ModDir {
+    /// `.` for `mod.rs`, `lib.rs`
+    /// `./foo` for `foo.rs`
+    /// `./foo/bar` for `mod bar { mod x; }` nested in `foo.rs`
+    path: RelativePathBuf,
+    /// inside `./foo.rs`, mods with `#[path]` should *not* be relative to `./foo/`
+    root_non_dir_owner: bool,
 }
 
-impl<'a> ParentModule<'a> {
-    fn attribute_path(&self) -> Option<&SmolStr> {
-        self.attr_path.filter(|p| !p.is_empty())
+impl ModDir {
+    pub(super) fn root() -> ModDir {
+        ModDir { path: RelativePathBuf::default(), root_non_dir_owner: false }
     }
-}
 
-pub(super) fn resolve_submodule(
-    db: &impl DefDatabase,
-    file_id: HirFileId,
-    mod_attr_path: Option<&SmolStr>,
-    name: &Name,
-    is_root: bool,
-    attr_path: Option<&SmolStr>,
-    parent_module: Option<ParentModule<'_>>,
-) -> Result<FileId, RelativePathBuf> {
-    let file_id = file_id.original_file(db);
-    let source_root_id = db.file_source_root(file_id);
-    let path = db.file_relative_path(file_id);
-    let root = RelativePathBuf::default();
-    let dir_path = path.parent().unwrap_or(&root);
-    let mod_name = path.file_stem().unwrap_or("unknown");
-
-    let resolve_mode = match (attr_path.filter(|p| !p.is_empty()), parent_module) {
-        (Some(file_path), Some(parent_module)) => {
-            let file_path = normalize_attribute_path(file_path);
-            match parent_module.attribute_path() {
-                Some(parent_module_attr_path) => {
-                    let path = dir_path
-                        .join(format!(
-                            "{}/{}",
-                            normalize_attribute_path(parent_module_attr_path),
-                            file_path
-                        ))
-                        .normalize();
-                    ResolutionMode::InlineModuleWithAttributePath(
-                        InsideInlineModuleMode::WithAttributePath(path),
-                    )
+    pub(super) fn descend_into_definition(
+        &self,
+        name: &Name,
+        attr_path: Option<&SmolStr>,
+    ) -> ModDir {
+        let mut path = self.path.clone();
+        match attr_to_path(attr_path) {
+            None => path.push(&name.to_string()),
+            Some(attr_path) => {
+                if self.root_non_dir_owner {
+                    assert!(path.pop());
                 }
-                None => {
-                    let path =
-                        dir_path.join(format!("{}/{}", parent_module.name, file_path)).normalize();
-                    ResolutionMode::InsideInlineModule(InsideInlineModuleMode::WithAttributePath(
-                        path,
-                    ))
-                }
+                path.push(attr_path);
             }
         }
-        (None, Some(parent_module)) => match parent_module.attribute_path() {
-            Some(parent_module_attr_path) => {
-                let path = dir_path.join(format!(
-                    "{}/{}.rs",
-                    normalize_attribute_path(parent_module_attr_path),
-                    name
-                ));
-                ResolutionMode::InlineModuleWithAttributePath(InsideInlineModuleMode::File(path))
+        ModDir { path, root_non_dir_owner: false }
+    }
+
+    pub(super) fn resolve_declaration(
+        &self,
+        db: &impl DefDatabase,
+        file_id: HirFileId,
+        name: &Name,
+        attr_path: Option<&SmolStr>,
+    ) -> Result<(FileId, ModDir), RelativePathBuf> {
+        let file_id = file_id.original_file(db);
+
+        let mut candidate_files = Vec::new();
+        match attr_to_path(attr_path) {
+            Some(attr_path) => {
+                let base =
+                    if self.root_non_dir_owner { self.path.parent().unwrap() } else { &self.path };
+                candidate_files.push(base.join(attr_path))
             }
             None => {
-                let path = dir_path.join(format!("{}/{}.rs", parent_module.name, name));
-                ResolutionMode::InsideInlineModule(InsideInlineModuleMode::File(path))
+                candidate_files.push(self.path.join(&format!("{}.rs", name)));
+                candidate_files.push(self.path.join(&format!("{}/mod.rs", name)));
             }
-        },
-        (Some(file_path), None) => {
-            let file_path = normalize_attribute_path(file_path);
-            let path = dir_path.join(file_path.as_ref()).normalize();
-            ResolutionMode::OutOfLine(OutOfLineMode::WithAttributePath(path))
-        }
-        (None, None) => {
-            let is_dir_owner = is_root || mod_name == "mod" || mod_attr_path.is_some();
-            if is_dir_owner {
-                let file_mod = dir_path.join(format!("{}.rs", name));
-                let dir_mod = dir_path.join(format!("{}/mod.rs", name));
-                ResolutionMode::OutOfLine(OutOfLineMode::RootOrModRs {
-                    file: file_mod,
-                    directory: dir_mod,
-                })
-            } else {
-                let path = dir_path.join(format!("{}/{}.rs", mod_name, name));
-                ResolutionMode::OutOfLine(OutOfLineMode::FileInDirectory(path))
-            }
-        }
-    };
+        };
 
-    resolve_mode.resolve(db.source_root(source_root_id))
-}
-
-fn normalize_attribute_path(file_path: &SmolStr) -> Cow<str> {
-    let current_dir = "./";
-    let windows_path_separator = r#"\"#;
-    let current_dir_normalize = if file_path.starts_with(current_dir) {
-        &file_path[current_dir.len()..]
-    } else {
-        file_path.as_str()
-    };
-    if current_dir_normalize.contains(windows_path_separator) {
-        Cow::Owned(current_dir_normalize.replace(windows_path_separator, "/"))
-    } else {
-        Cow::Borrowed(current_dir_normalize)
-    }
-}
-
-enum OutOfLineMode {
-    RootOrModRs { file: RelativePathBuf, directory: RelativePathBuf },
-    FileInDirectory(RelativePathBuf),
-    WithAttributePath(RelativePathBuf),
-}
-
-impl OutOfLineMode {
-    pub fn resolve(&self, source_root: Arc<SourceRoot>) -> Result<FileId, RelativePathBuf> {
-        match self {
-            OutOfLineMode::RootOrModRs { file, directory } => {
-                match source_root.file_by_relative_path(file) {
-                    None => resolve_simple_path(source_root, directory).map_err(|_| file.clone()),
-                    file_id => resolve_find_result(file_id, file),
+        for candidate in candidate_files.iter() {
+            if let Some(file_id) = db.resolve_relative_path(file_id, candidate) {
+                let mut root_non_dir_owner = false;
+                let mut mod_path = RelativePathBuf::new();
+                if !(candidate.ends_with("mod.rs") || attr_path.is_some()) {
+                    root_non_dir_owner = true;
+                    mod_path.push(&name.to_string());
                 }
-            }
-            OutOfLineMode::FileInDirectory(path) => resolve_simple_path(source_root, path),
-            OutOfLineMode::WithAttributePath(path) => resolve_simple_path(source_root, path),
-        }
-    }
-}
-
-enum InsideInlineModuleMode {
-    File(RelativePathBuf),
-    WithAttributePath(RelativePathBuf),
-}
-
-impl InsideInlineModuleMode {
-    pub fn resolve(&self, source_root: Arc<SourceRoot>) -> Result<FileId, RelativePathBuf> {
-        match self {
-            InsideInlineModuleMode::File(path) => resolve_simple_path(source_root, path),
-            InsideInlineModuleMode::WithAttributePath(path) => {
-                resolve_simple_path(source_root, path)
+                return Ok((file_id, ModDir { path: mod_path, root_non_dir_owner }));
             }
         }
+        Err(candidate_files.remove(0))
     }
 }
 
-enum ResolutionMode {
-    OutOfLine(OutOfLineMode),
-    InsideInlineModule(InsideInlineModuleMode),
-    InlineModuleWithAttributePath(InsideInlineModuleMode),
-}
-
-impl ResolutionMode {
-    pub fn resolve(&self, source_root: Arc<SourceRoot>) -> Result<FileId, RelativePathBuf> {
-        use self::ResolutionMode::*;
-
-        match self {
-            OutOfLine(mode) => mode.resolve(source_root),
-            InsideInlineModule(mode) => mode.resolve(source_root),
-            InlineModuleWithAttributePath(mode) => mode.resolve(source_root),
-        }
-    }
-}
-
-fn resolve_simple_path(
-    source_root: Arc<SourceRoot>,
-    path: &RelativePathBuf,
-) -> Result<FileId, RelativePathBuf> {
-    resolve_find_result(source_root.file_by_relative_path(path), path)
-}
-
-fn resolve_find_result(
-    file_id: Option<FileId>,
-    path: &RelativePathBuf,
-) -> Result<FileId, RelativePathBuf> {
-    match file_id {
-        Some(file_id) => Ok(file_id.clone()),
-        None => Err(path.clone()),
-    }
+fn attr_to_path(attr: Option<&SmolStr>) -> Option<RelativePathBuf> {
+    attr.and_then(|it| RelativePathBuf::from_path(&it.replace("\\", "/")).ok())
 }
